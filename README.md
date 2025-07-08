@@ -2,7 +2,7 @@
 
 This repository contains a basic, from-scratch implementation of a Recurrent Neural Network (RNN) in C++. Its purpose is to demonstrate the fundamental concepts of RNN architecture, forward propagation, loss calculation, and a simplified backward propagation (training) process.
 
-**Disclaimer:** This is a **toy model** for educational purposes. It uses a **highly simplified RNN architecture and a rudimentary training mechanism**. It is **NOT suitable for real-world medical applications** or any production use. Real-world deep learning for clinical tasks requires robust frameworks (e.g., TensorFlow, PyTorch), advanced architectures (e.g., LSTMs, GRUs, Transformers), and vast, properly curated datasets.
+**Disclaimer:** This is a demo for educational purposes. It uses a **highly simplified RNN architecture and a rudimentary training mechanism**. It is **NOT suitable for real-world medical applications** or any production use. Real-world deep learning for clinical tasks requires robust frameworks (e.g., TensorFlow, PyTorch), advanced architectures (e.g., LSTMs, GRUs, Transformers), and vast, properly curated datasets.  HOWEVER...a little elbow grease with examples like this can yield a better understanding and ownership of ML/AI techniques.
 
 ---
 
