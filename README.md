@@ -70,19 +70,19 @@ This project aims to classify short, simulated clinical notes into one of three 
 ## Building and Running
 
 1.  **Save the files:**
-    * Save the content of `simulated_data.h` into a file named `simulated_data.h`.
-    * Save the content of `simple_rnn.cpp` into a file named `simple_rnn.cpp`.
+    * Save the content of `synthetic_training_data.h` into a file named `synthetic_training_data.h`.
+    * Save the content of `clinical_rnn.cpp` into a file named `clinical_rnn.cpp`.
 
 2.  **Compile:** Open your terminal or command prompt, navigate to the directory where you saved the files, and compile using:
 
     ```bash
-    g++ simple_rnn.cpp -o simple_rnn -std=c++17 -O2 -Wall
+    g++ clinical_rnn.cpp -o clinicall_rnn -std=c++17 -O2 -Wall
     ```
 
 3.  **Run:** Execute the compiled program:
 
     ```bash
-    ./simple_rnn
+    ./clinical_rnn
     ```
 
 ## Output Example
