@@ -11,6 +11,8 @@
 
 #include "synthetic_training_data.h" // Include the simulated data header
 
+
+// Cleaned up and organized with help from Google Gemini so be cautious!
 // --- Basic Matrix Operations (Simplified, for demonstration only) ---
 // In a real application, use a proper linear algebra library like Eigen.
 
