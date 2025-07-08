@@ -5,7 +5,7 @@
 #include <string>
 #include <utility> // Required for std::pair
 
-// This data is *simulated* and *fictional* for demonstration purposes only.
+// This data is artificial for demonstration purposes only.
 // It does NOT contain real patient information or Protected Health Information (PHI).
 // It is designed to mimic clinical notes for a simplified "diagnosis" task.
 
