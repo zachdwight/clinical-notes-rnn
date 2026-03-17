@@ -1,0 +1,19 @@
+text,label
+"Patient presents with mild cough and runny nose",Cold
+"Sore throat and slight fever of 99F",Cold
+"Nasal congestion with dry cough",Cold
+"Complains of body aches and chills",Flu
+"High fever 102F with severe fatigue",Flu
+"Muscle pain and headache throughout body",Flu
+"Productive cough with green sputum",Pneumonia
+"Severe shortness of breath and fever",Pneumonia
+"Chest tightness and difficulty breathing",Pneumonia
+"Patient sneezing with minor congestion",Cold
+"Scratchy throat and post-nasal drip",Cold
+"Watery eyes and occasional sniffling",Cold
+"Acute onset of fever and generalized aching",Flu
+"Patient feels wiped out and exhausted",Flu
+"Severe headache with fever of 103F",Flu
+"Coughing up yellow phlegm with dyspnea",Pneumonia
+"Decreased oxygen saturation noted",Pneumonia
+"Auscultation reveals crackles in lung base",Pneumonia

@@ -138,6 +138,392 @@ std::vector<int> tokenize_text(const std::string& text,
     return word_ids;
 }
 
+// ============================================================================
+// CLI AND SERIALIZATION UTILITIES
+// ============================================================================
+
+// Command-line argument container
+struct ProgramArgs {
+    std::string mode = "train";           // "train" or "infer"
+    std::string model_file = "";          // Path to model file
+    std::string data_file = "";           // Path to training/inference data
+    std::string config_file = "";         // Path to config file
+    std::string input_text = "";          // Single input text for inference
+    std::string output_file = "";         // Output file for batch results
+};
+
+// Training configuration container
+struct TrainingConfig {
+    int num_epochs = 100;
+    double learning_rate = 0.01;
+    double learning_rate_decay = 0.05;
+    bool use_data_split = true;
+    double gradient_clip_norm = 1.0;
+    int hidden_size = 10;
+    std::string save_model = "model.json";
+    std::string save_history = "training_history.csv";
+};
+
+// Prediction result for batch inference
+struct PredictionResult {
+    std::string text;
+    std::string true_label;
+    std::string predicted_label;
+    std::vector<double> probabilities;
+    std::vector<std::string> class_names;
+};
+
+// ============================================================================
+// HELP MESSAGE
+// ============================================================================
+
+void print_help_message() {
+    std::cout << R"(
+================================================================================
+  Clinical Notes RNN - Flexible Training and Inference Tool
+================================================================================
+
+USAGE:
+  ./clinical_rnn --mode train --data <file> --config <file> --model <file>
+  ./clinical_rnn --mode infer --model <file> --input "<text>"
+  ./clinical_rnn --mode infer --model <file> --data <file> --output <file>
+
+MODES:
+  train     Train a new model on custom data
+  infer     Use a trained model to classify clinical notes
+
+REQUIRED ARGUMENTS:
+  --mode <train|infer>      Operation mode (default: train)
+  --model <path>            Model file path (save for train, load for infer)
+
+TRAINING ARGUMENTS:
+  --data <path>             CSV file with training data (required for train)
+  --config <path>           JSON config file with hyperparameters (optional)
+
+INFERENCE ARGUMENTS:
+  --input <text>            Single clinical note to classify
+                            OR use --data for batch inference
+  --data <path>             CSV file with test data (for batch inference)
+  --output <path>           Output CSV file for batch results (optional)
+
+EXAMPLES:
+
+1. Train a model:
+   ./clinical_rnn --mode train \
+     --data training_notes.csv \
+     --config training_config.json \
+     --model my_model.json
+
+2. Classify a single note:
+   ./clinical_rnn --mode infer \
+     --model my_model.json \
+     --input "Patient has fever and sore throat"
+
+3. Batch classification:
+   ./clinical_rnn --mode infer \
+     --model my_model.json \
+     --data test_notes.csv \
+     --output predictions.csv
+
+DATA FORMATS:
+
+CSV Format (training_notes.csv):
+  text,label
+  "Patient presents with fever and cough",Cold
+  "Severe body aches and chills",Flu
+  "Productive cough and shortness of breath",Pneumonia
+
+JSON Config (training_config.json):
+  {
+    "training": {
+      "num_epochs": 100,
+      "learning_rate": 0.01,
+      "learning_rate_decay": 0.05,
+      "use_data_split": true
+    },
+    "architecture": {
+      "hidden_size": 10
+    }
+  }
+
+Saved Model (my_model.json):
+  - Contains architecture, vocabulary, class labels, and trained weights
+  - Can be used for inference without retraining
+  - Portable across systems
+
+================================================================================
+)" << std::endl;
+}
+
+// ============================================================================
+// ARGUMENT PARSING
+// ============================================================================
+
+ProgramArgs parse_arguments(int argc, char* argv[]) {
+    ProgramArgs args;
+
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+
+        if (arg == "--mode" && i + 1 < argc) {
+            args.mode = argv[++i];
+        } else if (arg == "--model" && i + 1 < argc) {
+            args.model_file = argv[++i];
+        } else if (arg == "--data" && i + 1 < argc) {
+            args.data_file = argv[++i];
+        } else if (arg == "--config" && i + 1 < argc) {
+            args.config_file = argv[++i];
+        } else if (arg == "--input" && i + 1 < argc) {
+            args.input_text = argv[++i];
+        } else if (arg == "--output" && i + 1 < argc) {
+            args.output_file = argv[++i];
+        }
+    }
+
+    return args;
+}
+
+// ============================================================================
+// JSON SERIALIZATION UTILITIES
+// ============================================================================
+
+// Simple JSON helpers - escapes strings for JSON
+std::string json_escape(const std::string& s) {
+    std::string result;
+    for (char c : s) {
+        switch (c) {
+            case '"': result += "\\\""; break;
+            case '\\': result += "\\\\"; break;
+            case '\n': result += "\\n"; break;
+            case '\r': result += "\\r"; break;
+            case '\t': result += "\\t"; break;
+            default: result += c;
+        }
+    }
+    return result;
+}
+
+// Convert Matrix to JSON string
+std::string matrix_to_json(const Matrix& mat) {
+    std::stringstream ss;
+    ss << "[";
+    for (size_t i = 0; i < mat.size(); ++i) {
+        ss << "[";
+        for (size_t j = 0; j < mat[i].size(); ++j) {
+            ss << std::fixed << std::setprecision(10) << mat[i][j];
+            if (j < mat[i].size() - 1) ss << ",";
+        }
+        ss << "]";
+        if (i < mat.size() - 1) ss << ",";
+    }
+    ss << "]";
+    return ss.str();
+}
+
+// Parse Matrix from JSON array string
+Matrix json_to_matrix(const std::string& json_str) {
+    Matrix mat;
+    std::stringstream ss(json_str);
+    char c;
+
+    ss >> c;  // consume '['
+    while (ss >> c && c != ']') {
+        if (c == '[') {
+            Vector row;
+            double val;
+            while (ss >> val) {
+                row.push_back(val);
+                ss >> c;
+                if (c != ',') break;
+            }
+            if (!row.empty()) mat.push_back(row);
+        }
+    }
+
+    return mat;
+}
+
+// ============================================================================
+// CONFIG FILE LOADING
+// ============================================================================
+
+TrainingConfig load_config_json(const std::string& filename) {
+    TrainingConfig config;
+
+    std::ifstream file(filename);
+    if (!file.is_open()) {
+        std::cerr << "Warning: Could not open config file: " << filename << "\n";
+        std::cerr << "Using default configuration.\n";
+        return config;
+    }
+
+    std::stringstream buffer;
+    buffer << file.rdbuf();
+    std::string content = buffer.str();
+
+    // Simple JSON parsing - look for key: value pairs
+    auto extract_int = [&](const std::string& key) {
+        auto pos = content.find("\"" + key + "\"");
+        if (pos != std::string::npos) {
+            auto colon = content.find(":", pos);
+            if (colon != std::string::npos) {
+                auto comma = content.find(",", colon);
+                if (comma == std::string::npos) comma = content.find("}", colon);
+                std::string value_str = content.substr(colon + 1, comma - colon - 1);
+                // Trim whitespace
+                value_str.erase(0, value_str.find_first_not_of(" \t\n\r"));
+                value_str.erase(value_str.find_last_not_of(" \t\n\r") + 1);
+                try { return std::stoi(value_str); } catch (...) {}
+            }
+        }
+        return 0;
+    };
+
+    auto extract_double = [&](const std::string& key) {
+        auto pos = content.find("\"" + key + "\"");
+        if (pos != std::string::npos) {
+            auto colon = content.find(":", pos);
+            if (colon != std::string::npos) {
+                auto comma = content.find(",", colon);
+                if (comma == std::string::npos) comma = content.find("}", colon);
+                std::string value_str = content.substr(colon + 1, comma - colon - 1);
+                // Trim whitespace
+                value_str.erase(0, value_str.find_first_not_of(" \t\n\r"));
+                value_str.erase(value_str.find_last_not_of(" \t\n\r") + 1);
+                try { return std::stod(value_str); } catch (...) {}
+            }
+        }
+        return 0.0;
+    };
+
+    auto extract_bool = [&](const std::string& key) {
+        auto pos = content.find("\"" + key + "\"");
+        if (pos != std::string::npos) {
+            auto colon = content.find(":", pos);
+            if (colon != std::string::npos) {
+                std::string rest = content.substr(colon + 1);
+                return rest.find("true") < rest.find("false");
+            }
+        }
+        return false;
+    };
+
+    // Extract configuration values
+    config.num_epochs = extract_int("num_epochs");
+    if (config.num_epochs == 0) config.num_epochs = 100;
+
+    config.learning_rate = extract_double("learning_rate");
+    if (config.learning_rate < 0.0001) config.learning_rate = 0.01;
+
+    config.learning_rate_decay = extract_double("learning_rate_decay");
+    config.use_data_split = extract_bool("use_data_split");
+    config.gradient_clip_norm = extract_double("gradient_clip_norm");
+    if (config.gradient_clip_norm < 0.1) config.gradient_clip_norm = 1.0;
+
+    config.hidden_size = extract_int("hidden_size");
+    if (config.hidden_size == 0) config.hidden_size = 10;
+
+    file.close();
+    return config;
+}
+
+// ============================================================================
+// CSV DATA LOADING
+// ============================================================================
+
+std::vector<std::pair<std::string, std::string>> load_dataset_csv(const std::string& filename) {
+    std::vector<std::pair<std::string, std::string>> dataset;
+
+    std::ifstream file(filename);
+    if (!file.is_open()) {
+        std::cerr << "Error: Could not open data file: " << filename << "\n";
+        return dataset;
+    }
+
+    std::string line;
+    bool first_line = true;
+
+    while (std::getline(file, line)) {
+        if (first_line) {
+            first_line = false;  // Skip header
+            continue;
+        }
+
+        if (line.empty()) continue;
+
+        // Parse CSV line (handle quoted fields)
+        size_t quote_pos = line.find('"');
+        if (quote_pos == std::string::npos) {
+            // Simple case: no quotes
+            auto comma = line.find(',');
+            if (comma != std::string::npos) {
+                std::string text = line.substr(0, comma);
+                std::string label = line.substr(comma + 1);
+                // Trim whitespace
+                label.erase(0, label.find_first_not_of(" \t\n\r"));
+                dataset.push_back({text, label});
+            }
+        } else {
+            // Quoted field
+            size_t end_quote = line.find('"', quote_pos + 1);
+            if (end_quote != std::string::npos) {
+                std::string text = line.substr(quote_pos + 1, end_quote - quote_pos - 1);
+                // Find label after closing quote
+                size_t comma = line.find(',', end_quote);
+                if (comma != std::string::npos) {
+                    std::string label = line.substr(comma + 1);
+                    label.erase(0, label.find_first_not_of(" \t\n\r"));
+                    dataset.push_back({text, label});
+                }
+            }
+        }
+    }
+
+    file.close();
+    std::cout << "Loaded " << dataset.size() << " samples from " << filename << "\n";
+    return dataset;
+}
+
+// ============================================================================
+// VOCABULARY BUILDING
+// ============================================================================
+
+std::map<std::string, int> build_vocabulary(const std::vector<std::pair<std::string, std::string>>& dataset) {
+    std::map<std::string, int> vocab;
+    int word_id = 0;
+
+    for (const auto& note_pair : dataset) {
+        const std::string& text = note_pair.first;
+        std::string current_word;
+
+        for (char c : text) {
+            if (c == ' ' || c == '\n' || c == '\t' || c == '.' || c == ',' || c == '(' || c == ')') {
+                if (!current_word.empty()) {
+                    std::transform(current_word.begin(), current_word.end(), current_word.begin(),
+                                   [](unsigned char ch) { return std::tolower(ch); });
+                    if (vocab.find(current_word) == vocab.end()) {
+                        vocab[current_word] = word_id++;
+                    }
+                    current_word.clear();
+                }
+            } else {
+                current_word += c;
+            }
+        }
+
+        if (!current_word.empty()) {
+            std::transform(current_word.begin(), current_word.end(), current_word.begin(),
+                           [](unsigned char ch) { return std::tolower(ch); });
+            if (vocab.find(current_word) == vocab.end()) {
+                vocab[current_word] = word_id++;
+            }
+        }
+    }
+
+    std::cout << "Built vocabulary with " << vocab.size() << " unique words\n";
+    return vocab;
+}
+
 void printMatrix(const Matrix& mat, const std::string& name = "") {
     if (!name.empty()) {
         std::cout << name << ":\n";
@@ -688,120 +1074,362 @@ public:
         std::cout << "--- Training Finished ---\n";
         return history;
     }
+
+    // Save trained model to JSON file (includes architecture, vocab, and weights)
+    void save_model(const std::string& filename,
+                    const std::map<std::string, int>& vocabulary,
+                    const std::vector<std::string>& diagnosis_labels = {}) {
+        std::ofstream file(filename);
+        if (!file.is_open()) {
+            std::cerr << "Error: Could not open file for writing: " << filename << "\n";
+            return;
+        }
+
+        file << "{\n";
+
+        // Architecture section
+        file << "  \"architecture\": {\n";
+        file << "    \"vocab_size\": " << vocab_size << ",\n";
+        file << "    \"hidden_size\": " << hidden_size << ",\n";
+        file << "    \"output_size\": " << output_size << ",\n";
+        file << "    \"learning_rate\": " << std::fixed << std::setprecision(10) << learning_rate << ",\n";
+        file << "    \"gradient_clip_norm\": " << gradient_clip_norm << "\n";
+        file << "  },\n";
+
+        // Vocabulary section
+        file << "  \"vocabulary\": {\n";
+        int vocab_count = 0;
+        for (const auto& pair : vocabulary) {
+            file << "    \"" << json_escape(pair.first) << "\": " << pair.second;
+            if (++vocab_count < vocabulary.size()) file << ",";
+            file << "\n";
+        }
+        file << "  },\n";
+
+        // Diagnosis labels section
+        file << "  \"diagnosis_labels\": [";
+        if (!diagnosis_labels.empty()) {
+            file << "\n";
+            for (size_t i = 0; i < diagnosis_labels.size(); ++i) {
+                file << "    \"" << diagnosis_labels[i] << "\"";
+                if (i < diagnosis_labels.size() - 1) file << ",";
+                file << "\n";
+            }
+            file << "  ";
+        }
+        file << "],\n";
+
+        // Weights section
+        file << "  \"weights\": {\n";
+        file << "    \"W_hh\": " << matrix_to_json(W_hh) << ",\n";
+        file << "    \"W_xh\": " << matrix_to_json(W_xh) << ",\n";
+        file << "    \"W_hy\": " << matrix_to_json(W_hy) << ",\n";
+        file << "    \"b_h\": " << matrix_to_json(b_h) << ",\n";
+        file << "    \"b_y\": " << matrix_to_json(b_y) << "\n";
+        file << "  }\n";
+
+        file << "}\n";
+        file.close();
+
+        std::cout << "Model saved to " << filename << "\n";
+    }
+
+    // Load trained model from JSON file
+    bool load_model(const std::string& filename,
+                    std::map<std::string, int>& vocabulary,
+                    std::vector<std::string>& diagnosis_labels) {
+        std::ifstream file(filename);
+        if (!file.is_open()) {
+            std::cerr << "Error: Could not open model file: " << filename << "\n";
+            return false;
+        }
+
+        std::stringstream buffer;
+        buffer << file.rdbuf();
+        std::string content = buffer.str();
+        file.close();
+
+        // Simple JSON parsing
+        // Extract W_hh
+        auto extract_matrix = [&](const std::string& key) {
+            size_t pos = content.find("\"" + key + "\"");
+            if (pos != std::string::npos) {
+                size_t start = content.find("[", pos);
+                if (start != std::string::npos) {
+                    int bracket_count = 0;
+                    size_t end = start;
+                    for (size_t i = start; i < content.size(); ++i) {
+                        if (content[i] == '[') bracket_count++;
+                        if (content[i] == ']') bracket_count--;
+                        if (bracket_count == 0) {
+                            end = i + 1;
+                            break;
+                        }
+                    }
+                    std::string matrix_str = content.substr(start, end - start);
+                    return json_to_matrix(matrix_str);
+                }
+            }
+            return Matrix();
+        };
+
+        // Load weights
+        W_hh = extract_matrix("W_hh");
+        W_xh = extract_matrix("W_xh");
+        W_hy = extract_matrix("W_hy");
+        b_h = extract_matrix("b_h");
+        b_y = extract_matrix("b_y");
+
+        // Extract vocabulary
+        auto vocab_start = content.find("\"vocabulary\"");
+        if (vocab_start != std::string::npos) {
+            auto vocab_section_start = content.find("{", vocab_start);
+            auto vocab_section_end = content.find("}", vocab_start);
+            if (vocab_section_start != std::string::npos && vocab_section_end != std::string::npos) {
+                std::string vocab_str = content.substr(vocab_section_start + 1, vocab_section_end - vocab_section_start - 1);
+                std::istringstream iss(vocab_str);
+                std::string line;
+                while (std::getline(iss, line)) {
+                    auto quote_pos = line.find("\"");
+                    if (quote_pos != std::string::npos) {
+                        auto end_quote = line.find("\"", quote_pos + 1);
+                        if (end_quote != std::string::npos) {
+                            std::string word = line.substr(quote_pos + 1, end_quote - quote_pos - 1);
+                            auto colon = line.find(":", end_quote);
+                            if (colon != std::string::npos) {
+                                auto val_str = line.substr(colon + 1);
+                                try {
+                                    int id = std::stoi(val_str);
+                                    vocabulary[word] = id;
+                                } catch (...) {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Extract diagnosis labels
+        auto labels_pos = content.find("\"diagnosis_labels\"");
+        if (labels_pos != std::string::npos) {
+            auto arr_start = content.find("[", labels_pos);
+            auto arr_end = content.find("]", labels_pos);
+            if (arr_start != std::string::npos && arr_end != std::string::npos) {
+                std::string labels_str = content.substr(arr_start + 1, arr_end - arr_start - 1);
+                std::istringstream iss(labels_str);
+                std::string item;
+                while (std::getline(iss, item, ',')) {
+                    // Trim and remove quotes
+                    item.erase(0, item.find_first_not_of(" \t\n\r\""));
+                    item.erase(item.find_last_not_of(" \t\n\r\"") + 1);
+                    if (!item.empty()) {
+                        diagnosis_labels.push_back(item);
+                    }
+                }
+            }
+        }
+
+        std::cout << "Model loaded from " << filename << "\n";
+        std::cout << "  Vocabulary size: " << vocabulary.size() << "\n";
+        std::cout << "  Diagnosis labels: " << diagnosis_labels.size() << "\n";
+
+        return true;
+    }
 };
 
-int main() {
-    std::map<std::string, int> vocab = {
-        {"fever", 0}, {"cough", 1}, {"headache", 2}, {"sore", 3}, {"throat", 4},
-        {"fatigue", 5}, {"pneumonia", 6}, {"shortness", 7}, {"breath", 8},
-        {"muscle", 9}, {"aches", 10}, {"diagnosis", 11}, {"patient", 12},
-        {"has", 13}, {"symptoms", 14}, {"mild", 15}, {"severe", 16}, {"no", 17},
-        {"runny", 18}, {"nose", 19}, {"started", 20}, {"two", 21}, {"days", 22},
-        {"ago", 23}, {"complains", 24}, {"stuffy", 25}, {"sneezing", 26}, {"occasional", 27},
-        {"dry", 28}, {"feeling", 29}, {"slightly", 30}, {"tired", 31}, {"congestion", 32},
-        {"low", 33}, {"energy", 34}, {"reports", 35}, {"body", 36}, {"eating", 37},
-        {"well", 38}, {"child", 39}, {"clear", 40}, {"nasal", 41}, {"discharge", 42},
-        {"seems", 43}, {"otherwise", 44}, {"active", 45}, {"post-nasal", 46}, {"drip", 47},
-        {"scratchy", 48}, {"denies", 49}, {"chills", 50}, {"watery", 51}, {"eyes", 52},
-        {"bit", 53}, {"under", 54}, {"the", 55}, {"weather", 56}, {"persistent", 57},
-        {"episodes", 58}, {"passages", 59}, {"blocked", 60}, {"significant", 61}, {"pain", 62},
-        {"run", 63}, {"down", 64}, {"worsens", 65}, {"when", 66}, {"swallowing", 67},
-        {"minimal", 68}, {"minor", 69}, {"producing", 70}, {"phlegm", 71}, {"normal", 72},
-        {"temperature", 73}, {"just", 74}, {"general", 75}, {"unwell", 76}, {"sniffle", 77},
-        {"tickle", 78}, {"detected", 79}, {"itchy", 80}, {"malaise", 81}, {"head", 82},
-        {"sinus", 83}, {"pressure", 84}, {"able", 85}, {"perform", 86}, {"daily", 87},
-        {"activities", 88}, {"aches", 89}, {"are", 90}, {"primary", 91}, {"complaint", 92},
-        {"blockage", 93}, {"productive", 94}, {"irritation", 95}, {"drinking", 96}, {"fine", 97},
-        {"developed", 98}, {"last", 99}, {"night", 100}, {"common", 101}, {"morning", 102},
-        {"frequent", 103}, {"mostly", 104}, {"congested", 105}, {"other", 106}, {"exhausted", 107},
-        {"abrupt", 108}, {"onset", 109}, {"sudden", 110}, {"high", 111}, {"severe", 112},
-        {"generalized", 113}, {"intermittent", 114}, {"denies", 115}, {"nasal", 116}, {"congestion", 117},
-        {"chills", 118}, {"sweating", 119}, {"can", 120}, {"barely", 121}, {"get", 122},
-        {"out", 123}, {"bed", 124}, {"profound", 125}, {"weakness", 126}, {"throbbing", 127},
-        {"hacking", 128}, {"myalgia", 129}, {"arthralgia", 130}, {"sputum", 131}, {"feels", 132},
-        {"like", 133}, {"they've", 134}, {"been", 135}, {"hit", 136}, {"by", 137},
-        {"truck", 138}, {"extreme", 139}, {"tiredness", 140}, {"soreness", 141}, {"throughout", 142},
-        {"body", 143}, {"very", 144}, {"weak", 145}, {"has", 146}, {"flu-like", 147},
-        {"symptoms", 148}, {"classic", 149}, {"illness", 150}, {"joint", 151}, {"pain", 152},
-        {"overwhelming", 153}, {"temperature", 154}, {"unable", 155}, {"go", 156}, {"to", 157},
-        {"work", 158}, {"acute", 159}, {"drained", 160}, {"acute", 161}, {"onset", 162},
-        {"worsening", 163}, {"wiped", 164}, {"completely", 165}, {"difficulty", 166}, {"sleeping", 167},
-        {"due", 168}, {"discomfort", 169}, {"eat", 170}, {"much", 171}, {"respiratory", 172},
-        {"issues", 173}, {"noted", 174}, {"dyspnea", 175}, {"green", 176}, {"chest", 177},
-        {"with", 178}, {"breathing", 179}, {"decreased", 180}, {"oxygen", 181}, {"saturation", 182},
-        {"wet", 183}, {"yellow", 184}, {"auscultation", 185}, {"reveals", 186}, {"crackles", 187},
-        {"tightness", 188}, {"labored", 189}, {"rust-colored", 190}, {"sounds", 191}, {"lung", 192},
-        {"base", 193}, {"catching", 194}, {"elevated", 195}, {"rate", 196}, {"history", 197},
-        {"lung", 198}, {"issues", 199}, {"feels", 200}, {"winded", 201}, {"after", 202},
-        {"minimal", 203}, {"exertion", 204}, {"rhonchi", 205}, {"purulent", 206}, {"weakness", 207},
-        {"heard", 208}, {"lower", 209}, {"lobes", 210}, {"coughing", 211}, {"mucus", 212},
-        {"thick", 213}, {"looks", 214}, {"appears", 215}, {"distress", 216}, {"x-ray", 217},
-        {"ordered", 218}, {"blood-tinged", 219}, {"copious", 220}, {"rapid", 221}, {"shallow", 222},
-        {"discomfort", 223}, {"reduced", 224}, {"side", 225}, {"discharge", 226}, {"gasping", 227},
-        {"air", 228}, {"admitted", 229}, {"lie", 230}, {"flat", 231}, {"comfortably", 232}
-    };
+// ============================================================================
+// BATCH INFERENCE AND OUTPUT
+// ============================================================================
 
-    std::vector<std::string> diagnoses = {"Cold", "Flu", "Pneumonia"};
+void predict_single(SimpleRNN& rnn,
+                    const std::map<std::string, int>& vocabulary,
+                    const std::string& input_text,
+                    const std::vector<std::string>& diagnoses) {
+    std::vector<int> word_ids = tokenize_text(input_text, vocabulary, rnn.unk_token_id);
+    if (word_ids.empty()) {
+        std::cout << "Warning: No recognized words in input\n";
+        return;
+    }
 
-    int vocab_size = vocab.size();
-    int hidden_size = 10;
-    int output_size = diagnoses.size();
-    double learning_rate = 0.01;
-    int num_epochs = 100;
+    Vector predictions = rnn.forward(word_ids);
 
-    SimpleRNN rnn(vocab_size, hidden_size, output_size, learning_rate);
+    std::cout << "Input: \"" << input_text << "\"\n";
+    std::cout << "Predictions:\n";
+    for (size_t i = 0; i < diagnoses.size(); ++i) {
+        std::cout << "  " << diagnoses[i] << ": "
+                  << std::fixed << std::setprecision(2) << (predictions[i] * 100.0) << "%\n";
+    }
 
-    std::cout << "RNN Initialized with:\n";
-    std::cout << "  Vocab Size: " << rnn.vocab_size << "\n";
-    std::cout << "  Hidden Size: " << rnn.hidden_size << "\n";
-    std::cout << "  Output Size: " << rnn.output_size << "\n";
-    std::cout << "  Learning Rate: " << rnn.learning_rate << "\n";
-    std::cout << "  Gradient Clip Norm: " << rnn.gradient_clip_norm << "\n";
-    std::cout << "  Epochs: " << num_epochs << "\n";
+    auto max_it = std::max_element(predictions.begin(), predictions.end());
+    int predicted_index = std::distance(predictions.begin(), max_it);
+    std::cout << "Most probable: " << diagnoses[predicted_index] << "\n";
+}
 
-    // Train with data splitting and learning rate decay, capture training history
-    TrainingHistory history = rnn.train(SIMULATED_CLINICAL_NOTES, vocab, diagnoses, num_epochs, true, 0.05);
+std::vector<PredictionResult> batch_predict(SimpleRNN& rnn,
+                                            const std::map<std::string, int>& vocabulary,
+                                            const std::vector<std::pair<std::string, std::string>>& test_data,
+                                            const std::vector<std::string>& diagnoses) {
+    std::vector<PredictionResult> results;
 
-    // Save training history to CSV for loss curve visualization
-    history.save_to_csv("training_history.csv");
-
-    std::cout << "\n--- Final Predictions After Training ---\n";
-
-    std::vector<std::pair<std::string, std::string>> test_notes = {
-        {"Patient presents with mild cough, runny nose, and sore throat.", "Cold"},
-        {"Complains of body aches, chills, and a fever of 102F. Feels exhausted.", "Flu"},
-        {"Patient presents with productive cough (green sputum), shortness of breath, and fever.", "Pneumonia"},
-        {"No fever, but has a slight sore throat and runny nose.", "Cold"},
-        {"Severe fatigue, headache, and generalized muscle pain. Fever.", "Flu"},
-        {"Fever 102F, severe cough producing thick phlegm, and shortness of breath.", "Pneumonia"}
-    };
-
-    int test_count = 0;
-    for (const auto& note_pair : test_notes) {
-        const std::string& note_text = note_pair.first;
-        const std::string& true_diagnosis = note_pair.second;
-
-        test_count++;
-        std::cout << "\nTesting Note " << test_count << " (True: " << true_diagnosis << "): \"" << note_text << "\"\n";
-
-        // Tokenize text using helper function
-        std::vector<int> word_ids = tokenize_text(note_text, vocab, rnn.unk_token_id);
-        if (word_ids.empty()) {
-            std::cout << "  No recognized words in this note. Skipping.\n";
-            continue;
-        }
+    for (const auto& note_pair : test_data) {
+        std::vector<int> word_ids = tokenize_text(note_pair.first, vocabulary, rnn.unk_token_id);
+        if (word_ids.empty()) continue;
 
         Vector predictions = rnn.forward(word_ids);
 
-        std::cout << "  Predicted probabilities:\n";
-        for (size_t i = 0; i < diagnoses.size(); ++i) {
-            std::cout << "    " << diagnoses[i] << ": " << std::fixed << std::setprecision(2) << (predictions[i] * 100.0) << "%\n";
-        }
-
         auto max_it = std::max_element(predictions.begin(), predictions.end());
         int predicted_index = std::distance(predictions.begin(), max_it);
-        std::string predicted_diagnosis = diagnoses[predicted_index];
-        std::cout << "  Most probable diagnosis: " << predicted_diagnosis << " (True: " << true_diagnosis << ")\n";
+
+        PredictionResult result;
+        result.text = note_pair.first;
+        result.true_label = note_pair.second;
+        result.predicted_label = diagnoses[predicted_index];
+        result.class_names = diagnoses;
+        result.probabilities.assign(predictions.begin(), predictions.end());
+
+        results.push_back(result);
+    }
+
+    return results;
+}
+
+void save_predictions_csv(const std::string& filename,
+                          const std::vector<PredictionResult>& results) {
+    std::ofstream file(filename);
+    if (!file.is_open()) {
+        std::cerr << "Error: Could not open file for writing: " << filename << "\n";
+        return;
+    }
+
+    // Header
+    file << "text,true_label,predicted_label";
+    if (!results.empty() && !results[0].class_names.empty()) {
+        for (const auto& class_name : results[0].class_names) {
+            file << "," << class_name << "_probability";
+        }
+    }
+    file << "\n";
+
+    // Data rows
+    for (const auto& result : results) {
+        file << "\"" << result.text << "\"," << result.true_label << "," << result.predicted_label;
+        for (double prob : result.probabilities) {
+            file << "," << std::fixed << std::setprecision(6) << prob;
+        }
+        file << "\n";
+    }
+
+    file.close();
+    std::cout << "Results saved to " << filename << "\n";
+}
+
+int main(int argc, char* argv[]) {
+    // Show help if no arguments provided
+    if (argc == 1) {
+        print_help_message();
+        return 0;
+    }
+
+    // Parse command-line arguments
+    ProgramArgs args = parse_arguments(argc, argv);
+
+    std::vector<std::string> diagnoses = {"Cold", "Flu", "Pneumonia"};
+
+    if (args.mode == "train") {
+        // ====== TRAINING MODE ======
+        if (args.data_file.empty() || args.model_file.empty()) {
+            std::cerr << "Error: --data and --model required for training mode\n";
+            return 1;
+        }
+
+        // Load config or use defaults
+        TrainingConfig config = load_config_json(args.config_file.empty() ? "default" : args.config_file);
+
+        // Load training data
+        auto dataset = load_dataset_csv(args.data_file);
+        if (dataset.empty()) {
+            std::cerr << "Error: No data loaded from " << args.data_file << "\n";
+            return 1;
+        }
+
+        // Build vocabulary from data
+        std::map<std::string, int> vocabulary = build_vocabulary(dataset);
+
+        // Create and train RNN
+        int vocab_size = vocabulary.size() + 1;  // +1 for UNK token
+        SimpleRNN rnn(vocab_size, config.hidden_size, diagnoses.size(), config.learning_rate);
+        rnn.gradient_clip_norm = config.gradient_clip_norm;
+
+        std::cout << "\nStarting training...\n";
+        std::cout << "  Data: " << dataset.size() << " samples\n";
+        std::cout << "  Vocabulary: " << vocabulary.size() << " words\n";
+        std::cout << "  Epochs: " << config.num_epochs << "\n";
+        std::cout << "  Hidden size: " << config.hidden_size << "\n";
+
+        TrainingHistory history = rnn.train(dataset, vocabulary, diagnoses, config.num_epochs,
+                                            config.use_data_split, config.learning_rate_decay);
+
+        // Save model with embedded vocabulary
+        rnn.save_model(args.model_file, vocabulary, diagnoses);
+
+        // Save training history
+        history.save_to_csv(config.save_history);
+
+        std::cout << "\nTraining complete!\n";
+
+    } else if (args.mode == "infer") {
+        // ====== INFERENCE MODE ======
+        if (args.model_file.empty()) {
+            std::cerr << "Error: --model required for inference mode\n";
+            return 1;
+        }
+
+        if (args.input_text.empty() && args.data_file.empty()) {
+            std::cerr << "Error: --input or --data required for inference mode\n";
+            return 1;
+        }
+
+        // Load model (includes vocabulary and weights)
+        SimpleRNN rnn(1, 10, diagnoses.size(), 0.01);  // Dummy init, will be overwritten
+        std::map<std::string, int> vocabulary;
+        std::vector<std::string> loaded_diagnoses;
+
+        if (!rnn.load_model(args.model_file, vocabulary, loaded_diagnoses)) {
+            std::cerr << "Error: Failed to load model from " << args.model_file << "\n";
+            return 1;
+        }
+
+        // Update diagnoses from model if loaded
+        if (!loaded_diagnoses.empty()) {
+            diagnoses = loaded_diagnoses;
+        }
+
+        if (!args.input_text.empty()) {
+            // Single prediction
+            std::cout << "\n--- Single Prediction ---\n";
+            predict_single(rnn, vocabulary, args.input_text, diagnoses);
+
+        } else if (!args.data_file.empty()) {
+            // Batch inference
+            std::cout << "\n--- Batch Inference ---\n";
+            auto test_data = load_dataset_csv(args.data_file);
+            if (test_data.empty()) {
+                std::cerr << "Error: No test data loaded\n";
+                return 1;
+            }
+
+            auto results = batch_predict(rnn, vocabulary, test_data, diagnoses);
+            std::cout << "Predictions made for " << results.size() << " samples\n";
+
+            // Save results to CSV
+            std::string output_file = args.output_file.empty() ? "predictions.csv" : args.output_file;
+            save_predictions_csv(output_file, results);
+        }
+
+    } else {
+        std::cerr << "Error: Unknown mode '" << args.mode << "'. Use 'train' or 'infer'.\n";
+        print_help_message();
+        return 1;
     }
 
     return 0;

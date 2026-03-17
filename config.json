@@ -1,0 +1,16 @@
+{
+  "training": {
+    "num_epochs": 100,
+    "learning_rate": 0.01,
+    "learning_rate_decay": 0.05,
+    "use_data_split": true,
+    "gradient_clip_norm": 1.0
+  },
+  "architecture": {
+    "hidden_size": 10
+  },
+  "output": {
+    "save_model": "my_model.json",
+    "save_history": "training_history.csv"
+  }
+}
