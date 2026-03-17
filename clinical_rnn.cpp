@@ -1,4 +1,36 @@
+// ============================================================================
+// Clinical Notes RNN - Educational Recurrent Neural Network Implementation
+// ============================================================================
+//
+// This is an educational implementation of a Simple RNN designed to classify
+// clinical notes into three diagnostic categories: Cold, Flu, or Pneumonia.
+//
+// Key Components:
+// 1. Matrix Operations: Basic linear algebra for neural network computation
+// 2. Activation Functions: tanh (hidden layer), softmax (output layer)
+// 3. Loss Function: Cross-entropy loss with softmax (standard for classification)
+// 4. Training: Full Backpropagation Through Time (BPTT) with gradient clipping
+// 5. Evaluation: Per-class accuracy metrics to identify model weaknesses
+// 6. Data Handling: Train/validation/test splits, UNK token for unknown words
+//
+// Improvements over basic RNNs:
+// - Proper BPTT accumulates gradients across all time steps (not just final step)
+// - Gradient clipping prevents exploding/vanishing gradients
+// - Learning rate decay improves convergence
+// - Evaluation metrics track both overall and per-class performance
+// - Training history saved to CSV for loss curve visualization
+//
+// Limitations:
+// - This implementation is NOT suitable for production use on real medical data
+// - Naive matrix multiplication (use Eigen/Armadillo for production)
+// - Single-sample training (no mini-batching)
+// - No regularization techniques
+// - Small synthetic dataset (100 samples)
+//
+// ============================================================================
+
 #include <iostream>
+#include <fstream>
 #include <vector>
 #include <string>
 #include <map>
@@ -13,6 +45,98 @@
 
 using Matrix = std::vector<std::vector<double>>;
 using Vector = std::vector<double>;
+
+// ============================================================================
+// HELPER STRUCTURES FOR TRAINING AND EVALUATION
+// ============================================================================
+
+// Training metrics for a single epoch (used to track learning progress)
+struct EpochMetrics {
+    int epoch;
+    double train_loss;
+    double train_accuracy;
+    double val_loss;
+    double val_accuracy;
+    std::map<std::string, double> val_per_class_accuracy;
+};
+
+// Container to track all metrics throughout training (for visualization and analysis)
+struct TrainingHistory {
+    std::vector<EpochMetrics> epochs;
+    std::map<std::string, double> test_per_class_accuracy;
+    double test_loss;
+    double test_accuracy;
+
+    // Write training history to CSV file for plotting
+    void save_to_csv(const std::string& filename) const {
+        std::ofstream file(filename);
+        if (!file.is_open()) {
+            std::cerr << "Warning: Could not open " << filename << " for writing.\n";
+            return;
+        }
+
+        // Header
+        file << "Epoch,TrainLoss,TrainAccuracy,ValLoss,ValAccuracy\n";
+
+        // Data rows
+        for (const auto& metrics : epochs) {
+            file << metrics.epoch << ","
+                 << std::fixed << std::setprecision(6) << metrics.train_loss << ","
+                 << std::fixed << std::setprecision(6) << metrics.train_accuracy << ","
+                 << std::fixed << std::setprecision(6) << metrics.val_loss << ","
+                 << std::fixed << std::setprecision(6) << metrics.val_accuracy << "\n";
+        }
+        file.close();
+        std::cout << "Saved training history to " << filename << "\n";
+    }
+};
+
+// ============================================================================
+// TOKENIZATION HELPER FUNCTION
+// ============================================================================
+
+// Convert a text string to a sequence of word IDs using the vocabulary
+// Unknown words are mapped to the unk_token_id parameter
+std::vector<int> tokenize_text(const std::string& text,
+                                const std::map<std::string, int>& vocab_map,
+                                int unk_token_id) {
+    std::vector<int> word_ids;
+    std::string current_word;
+
+    for (char c : text) {
+        // Split on whitespace and punctuation
+        if (c == ' ' || c == '\n' || c == '\t' || c == '.' || c == ',' || c == '(' || c == ')') {
+            if (!current_word.empty()) {
+                // Convert to lowercase
+                std::transform(current_word.begin(), current_word.end(), current_word.begin(),
+                               [](unsigned char ch) { return std::tolower(ch); });
+
+                // Look up in vocabulary, use UNK for unknown words
+                if (vocab_map.count(current_word)) {
+                    word_ids.push_back(vocab_map.at(current_word));
+                } else {
+                    word_ids.push_back(unk_token_id);
+                }
+                current_word.clear();
+            }
+        } else {
+            current_word += c;
+        }
+    }
+
+    // Don't forget the last word
+    if (!current_word.empty()) {
+        std::transform(current_word.begin(), current_word.end(), current_word.begin(),
+                       [](unsigned char ch) { return std::tolower(ch); });
+        if (vocab_map.count(current_word)) {
+            word_ids.push_back(vocab_map.at(current_word));
+        } else {
+            word_ids.push_back(unk_token_id);
+        }
+    }
+
+    return word_ids;
+}
 
 void printMatrix(const Matrix& mat, const std::string& name = "") {
     if (!name.empty()) {
@@ -404,35 +528,8 @@ public:
             const std::string& note_text = note_pair.first;
             const std::string& true_label = note_pair.second;
 
-            // Tokenize
-            std::vector<int> word_ids;
-            std::string current_word;
-            for (char c : note_text) {
-                if (c == ' ' || c == '\n' || c == '\t' || c == '.' || c == ',' || c == '(' || c == ')') {
-                    if (!current_word.empty()) {
-                        std::transform(current_word.begin(), current_word.end(), current_word.begin(),
-                                       [](unsigned char ch){ return std::tolower(ch); });
-                        if (vocab_map.count(current_word)) {
-                            word_ids.push_back(vocab_map.at(current_word));
-                        } else {
-                            word_ids.push_back(unk_token_id);  // Use UNK for unknown words
-                        }
-                        current_word.clear();
-                    }
-                } else {
-                    current_word += c;
-                }
-            }
-            if (!current_word.empty()) {
-                std::transform(current_word.begin(), current_word.end(), current_word.begin(),
-                               [](unsigned char ch){ return std::tolower(ch); });
-                if (vocab_map.count(current_word)) {
-                    word_ids.push_back(vocab_map.at(current_word));
-                } else {
-                    word_ids.push_back(unk_token_id);
-                }
-            }
-
+            // Tokenize text using helper function
+            std::vector<int> word_ids = tokenize_text(note_text, vocab_map, unk_token_id);
             if (word_ids.empty()) continue;
 
             Vector predictions = forward(word_ids);
@@ -472,12 +569,15 @@ public:
         return target;
     }
 
-    void train(const std::vector<std::pair<std::string, std::string>>& training_data,
-               const std::map<std::string, int>& vocab_map,
-               const std::vector<std::string>& diagnosis_labels,
-               int num_epochs,
-               bool use_data_split = true,
-               double learning_rate_decay = 0.0) {
+    // Main training function with full metrics tracking
+    // Returns a TrainingHistory object containing loss/accuracy curves for analysis and visualization
+    TrainingHistory train(const std::vector<std::pair<std::string, std::string>>& training_data,
+                          const std::map<std::string, int>& vocab_map,
+                          const std::vector<std::string>& diagnosis_labels,
+                          int num_epochs,
+                          bool use_data_split = true,
+                          double learning_rate_decay = 0.0) {
+        TrainingHistory history;
 
         // Split data if requested
         std::vector<std::pair<std::string, std::string>> train_set = training_data;
@@ -513,34 +613,8 @@ public:
                 const std::string& note_text = note_pair.first;
                 const std::string& true_diagnosis_label = note_pair.second;
 
-                std::vector<int> word_ids;
-                std::string current_word;
-                for (char c : note_text) {
-                    if (c == ' ' || c == '\n' || c == '\t' || c == '.' || c == ',' || c == '(' || c == ')') {
-                        if (!current_word.empty()) {
-                            std::transform(current_word.begin(), current_word.end(), current_word.begin(),
-                                           [](unsigned char ch){ return std::tolower(ch); });
-                            if (vocab_map.count(current_word)) {
-                                word_ids.push_back(vocab_map.at(current_word));
-                            } else {
-                                word_ids.push_back(unk_token_id);  // Use UNK for unknown words
-                            }
-                            current_word.clear();
-                        }
-                    } else {
-                        current_word += c;
-                    }
-                }
-                if (!current_word.empty()) {
-                    std::transform(current_word.begin(), current_word.end(), current_word.begin(),
-                                   [](unsigned char ch){ return std::tolower(ch); });
-                    if (vocab_map.count(current_word)) {
-                        word_ids.push_back(vocab_map.at(current_word));
-                    } else {
-                        word_ids.push_back(unk_token_id);
-                    }
-                }
-
+                // Tokenize text using helper function
+                std::vector<int> word_ids = tokenize_text(note_text, vocab_map, unk_token_id);
                 if (word_ids.empty()) {
                     continue;
                 }
@@ -563,24 +637,45 @@ public:
                 total_predictions++;
             }
 
+            // Compute per-epoch training metrics
+            double train_loss = epoch_loss / total_predictions;
+            double train_accuracy = static_cast<double>(correct_predictions) / total_predictions;
+
             // Print training metrics
             std::cout << "Epoch " << epoch + 1 << " | Train Loss: " << std::fixed << std::setprecision(6)
-                      << epoch_loss / total_predictions << " | Train Acc: " << std::fixed << std::setprecision(2)
-                      << (static_cast<double>(correct_predictions) / total_predictions) * 100.0 << "%";
+                      << train_loss << " | Train Acc: " << std::fixed << std::setprecision(2)
+                      << train_accuracy * 100.0 << "%";
+
+            // Create epoch metrics record
+            EpochMetrics epoch_metrics;
+            epoch_metrics.epoch = epoch + 1;
+            epoch_metrics.train_loss = train_loss;
+            epoch_metrics.train_accuracy = train_accuracy;
 
             // Evaluate on validation set if available
             if (!val_set.empty()) {
                 EvaluationMetrics val_metrics = evaluate(val_set, vocab_map, diagnosis_labels);
+                epoch_metrics.val_loss = val_metrics.loss;
+                epoch_metrics.val_accuracy = val_metrics.accuracy;
+                epoch_metrics.val_per_class_accuracy = val_metrics.per_class_accuracy;
+
                 std::cout << " | Val Loss: " << std::fixed << std::setprecision(6) << val_metrics.loss
                           << " | Val Acc: " << std::fixed << std::setprecision(2) << val_metrics.accuracy * 100.0 << "%";
             }
             std::cout << "\n";
+
+            // Save epoch metrics to history
+            history.epochs.push_back(epoch_metrics);
         }
 
         // Final evaluation on test set
         if (!test_set.empty()) {
             std::cout << "\n--- Test Set Evaluation ---\n";
             EvaluationMetrics test_metrics = evaluate(test_set, vocab_map, diagnosis_labels);
+            history.test_loss = test_metrics.loss;
+            history.test_accuracy = test_metrics.accuracy;
+            history.test_per_class_accuracy = test_metrics.per_class_accuracy;
+
             std::cout << "Test Loss: " << std::fixed << std::setprecision(6) << test_metrics.loss << "\n";
             std::cout << "Test Accuracy: " << std::fixed << std::setprecision(2) << test_metrics.accuracy * 100.0 << "%\n";
             std::cout << "Per-Class Accuracy:\n";
@@ -591,6 +686,7 @@ public:
         }
 
         std::cout << "--- Training Finished ---\n";
+        return history;
     }
 };
 
@@ -663,8 +759,11 @@ int main() {
     std::cout << "  Gradient Clip Norm: " << rnn.gradient_clip_norm << "\n";
     std::cout << "  Epochs: " << num_epochs << "\n";
 
-    // Train with data splitting and learning rate decay
-    rnn.train(SIMULATED_CLINICAL_NOTES, vocab, diagnoses, num_epochs, true, 0.05);
+    // Train with data splitting and learning rate decay, capture training history
+    TrainingHistory history = rnn.train(SIMULATED_CLINICAL_NOTES, vocab, diagnoses, num_epochs, true, 0.05);
+
+    // Save training history to CSV for loss curve visualization
+    history.save_to_csv("training_history.csv");
 
     std::cout << "\n--- Final Predictions After Training ---\n";
 
@@ -685,34 +784,8 @@ int main() {
         test_count++;
         std::cout << "\nTesting Note " << test_count << " (True: " << true_diagnosis << "): \"" << note_text << "\"\n";
 
-        std::vector<int> word_ids;
-        std::string current_word;
-        for (char c : note_text) {
-            if (c == ' ' || c == '\n' || c == '\t' || c == '.' || c == ',' || c == '(' || c == ')') {
-                if (!current_word.empty()) {
-                    std::transform(current_word.begin(), current_word.end(), current_word.begin(),
-                                   [](unsigned char ch){ return std::tolower(ch); });
-                    if (vocab.count(current_word)) {
-                        word_ids.push_back(vocab.at(current_word));
-                    } else {
-                        word_ids.push_back(rnn.unk_token_id);  // Use UNK for unknown words
-                    }
-                    current_word.clear();
-                }
-            } else {
-                current_word += c;
-            }
-        }
-        if (!current_word.empty()) {
-            std::transform(current_word.begin(), current_word.end(), current_word.begin(),
-                           [](unsigned char ch){ return std::tolower(ch); });
-            if (vocab.count(current_word)) {
-                word_ids.push_back(vocab.at(current_word));
-            } else {
-                word_ids.push_back(rnn.unk_token_id);
-            }
-        }
-
+        // Tokenize text using helper function
+        std::vector<int> word_ids = tokenize_text(note_text, vocab, rnn.unk_token_id);
         if (word_ids.empty()) {
             std::cout << "  No recognized words in this note. Skipping.\n";
             continue;
