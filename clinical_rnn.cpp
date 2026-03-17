@@ -2,24 +2,18 @@
 #include <vector>
 #include <string>
 #include <map>
-#include <cmath>    // For tanh, exp
-#include <numeric>  // For accumulate (sum)
-#include <random>   // For random number generation
-#include <algorithm> // For std::max_element, std::transform
-#include <cctype>   // For std::tolower
-#include <iomanip>  // For std::fixed, std::setprecision
+#include <cmath>
+#include <numeric>
+#include <random>
+#include <algorithm>
+#include <cctype>
+#include <iomanip>
 
-#include "synthetic_training_data.h" // Include the simulated data header
-
-
-// Cleaned up and organized with help from Google Gemini so be cautious!
-// --- Basic Matrix Operations (Simplified, for demonstration only) ---
-// In a real application, use a proper linear algebra library like Eigen.
+#include "synthetic_training_data.h"
 
 using Matrix = std::vector<std::vector<double>>;
-using Vector = std::vector<double>; // Represents a row vector or column vector based on context
+using Vector = std::vector<double>;
 
-// Function to print a matrix (for debugging)
 void printMatrix(const Matrix& mat, const std::string& name = "") {
     if (!name.empty()) {
         std::cout << name << ":\n";
@@ -32,7 +26,6 @@ void printMatrix(const Matrix& mat, const std::string& name = "") {
     }
 }
 
-// Element-wise matrix subtraction (A - B)
 Matrix subtract(const Matrix& A, const Matrix& B) {
     size_t rows = A.size();
     size_t cols = A[0].size();
@@ -48,7 +41,6 @@ Matrix subtract(const Matrix& A, const Matrix& B) {
     return C;
 }
 
-// Matrix multiplication (A * B)
 Matrix multiply(const Matrix& A, const Matrix& B) {
     size_t rowsA = A.size();
     size_t colsA = A[0].size();
@@ -71,7 +63,6 @@ Matrix multiply(const Matrix& A, const Matrix& B) {
     return C;
 }
 
-// Matrix addition (A + B)
 Matrix add(const Matrix& A, const Matrix& B) {
     size_t rowsA = A.size();
     size_t colsA = A[0].size();
@@ -89,7 +80,6 @@ Matrix add(const Matrix& A, const Matrix& B) {
     return C;
 }
 
-// Element-wise multiplication (Hadamard product)
 Matrix hadamard_product(const Matrix& A, const Matrix& B) {
     size_t rows = A.size();
     size_t cols = A[0].size();
@@ -105,7 +95,6 @@ Matrix hadamard_product(const Matrix& A, const Matrix& B) {
     return C;
 }
 
-// Scale matrix by a scalar
 Matrix scale(const Matrix& mat, double scalar) {
     Matrix result = mat;
     for (auto& row : result) {
@@ -116,7 +105,6 @@ Matrix scale(const Matrix& mat, double scalar) {
     return result;
 }
 
-// Transpose a matrix
 Matrix transpose(const Matrix& mat) {
     size_t rows = mat.size();
     size_t cols = mat[0].size();
@@ -129,7 +117,6 @@ Matrix transpose(const Matrix& mat) {
     return transposed;
 }
 
-// Apply a function element-wise to a matrix
 Matrix apply_function(const Matrix& mat, double (*func)(double)) {
     Matrix result = mat;
     for (auto& row : result) {
@@ -140,18 +127,14 @@ Matrix apply_function(const Matrix& mat, double (*func)(double)) {
     return result;
 }
 
-// --- Activation Functions and their Derivatives ---
-
 double tanh_activation(double x) {
     return std::tanh(x);
 }
 
-// Derivative of tanh(x) = 1 - tanh(x)^2
 double tanh_derivative(double x) {
     return 1.0 - std::pow(std::tanh(x), 2);
 }
-// For backprop, we'll often use the output of the tanh function (h_t)
-// So, derivative of tanh(h) w.r.t. h is (1 - h^2)
+
 Matrix tanh_derivative_from_output(const Matrix& output) {
     Matrix result = output;
     for (auto& row : result) {
@@ -161,7 +144,6 @@ Matrix tanh_derivative_from_output(const Matrix& output) {
     }
     return result;
 }
-
 
 Vector softmax(const Vector& vec) {
     Vector exp_vec(vec.size());
@@ -178,36 +160,42 @@ Vector softmax(const Vector& vec) {
     return result;
 }
 
-// Simplified derivative of Softmax (Jacobian for a single output)
-// This is typically combined with Cross-Entropy Loss, where dL/dx = y_pred - y_true
-// For MSE with Softmax, the derivative is more complex. We'll use a simplified approach
-// for demonstration, assuming the error dY is directly propagated.
-// For true Softmax derivative, it's (diag(y) - y * y^T). This is too complex for this example.
-// We will just propagate the error (dY) back through the last linear layer.
-
-// --- Loss Function ---
-// Mean Squared Error (MSE)
-double mean_squared_error(const Vector& predictions, const Vector& targets) {
-    if (predictions.size() != targets.size()) {
-        throw std::invalid_argument("Prediction and target vectors must have the same size for MSE.");
-    }
-    double error_sum_sq = 0.0;
+// FIXED #2: Cross-entropy loss with softmax (replaces MSE)
+double cross_entropy_loss(const Vector& predictions, const Vector& targets) {
+    double loss = 0.0;
     for (size_t i = 0; i < predictions.size(); ++i) {
-        error_sum_sq += std::pow(predictions[i] - targets[i], 2);
+        if (targets[i] > 0) {  // Only for true class (one-hot encoded)
+            loss -= targets[i] * std::log(std::max(predictions[i], 1e-10));
+        }
     }
-    return error_sum_sq / predictions.size();
+    return loss;
 }
 
-// Derivative of MSE: d(MSE)/d(pred_i) = 2 * (pred_i - target_i) / N
-Vector mean_squared_error_derivative(const Vector& predictions, const Vector& targets) {
+// FIXED #2: Cross-entropy derivative with softmax is simply (predictions - targets)
+Vector cross_entropy_derivative(const Vector& predictions, const Vector& targets) {
     Vector grad(predictions.size());
     for (size_t i = 0; i < predictions.size(); ++i) {
-        grad[i] = 2.0 * (predictions[i] - targets[i]) / predictions.size();
+        grad[i] = predictions[i] - targets[i];
     }
-    return grad; // This is dL/dY_pred (d_output_unactivated)
+    return grad;
 }
 
-// --- SimpleRNN Class ---
+// FIXED #3: Gradient clipping to prevent exploding gradients
+double clip_value(double value, double max_val = 1.0) {
+    if (value > max_val) return max_val;
+    if (value < -max_val) return -max_val;
+    return value;
+}
+
+Matrix clip_gradients(const Matrix& gradients, double max_norm = 1.0) {
+    Matrix clipped = gradients;
+    for (auto& row : clipped) {
+        for (double& val : row) {
+            val = clip_value(val, max_norm);
+        }
+    }
+    return clipped;
+}
 
 class SimpleRNN {
 public:
@@ -215,33 +203,26 @@ public:
     int hidden_size;
     int output_size;
     double learning_rate;
+    double gradient_clip_norm;
 
-    // Weights and Biases
-    Matrix W_hh; // Hidden to hidden
-    Matrix W_xh; // Input to hidden
-    Matrix W_hy; // Hidden to output
+    Matrix W_hh;
+    Matrix W_xh;
+    Matrix W_hy;
 
-    Matrix b_h;  // Hidden bias
-    Matrix b_y;  // Output bias
+    Matrix b_h;
+    Matrix b_y;
 
-    // For caching during forward pass to use in backward pass
-    // This is crucial for backpropagation
-    std::vector<Matrix> hidden_states_history; // Stores h_t for each time step
-    std::vector<Matrix> pre_tanh_activations; // Stores inputs to tanh for each time step (h_t_unactivated)
+    std::vector<Matrix> hidden_states_history;
+    std::vector<Matrix> pre_tanh_activations;
 
-    // Constructor
     SimpleRNN(int vocab_s, int hidden_s, int output_s, double lr)
-        : vocab_size(vocab_s), hidden_size(hidden_s), output_size(output_s), learning_rate(lr) {
+        : vocab_size(vocab_s), hidden_size(hidden_s), output_size(output_s), learning_rate(lr), gradient_clip_norm(1.0) {
 
-        // Use a random number generator
         std::random_device rd;
         std::mt19937 gen(rd());
-        // Glorot/Xavier initialization for tanh: sqrt(6 / (fan_in + fan_out))
-        // Simplified to normal distribution with small variance
-        std::normal_distribution<> d_tanh(0.0, std::sqrt(2.0 / (hidden_size + vocab_size))); // W_xh, W_hh
-        std::normal_distribution<> d_linear(0.0, std::sqrt(2.0 / (hidden_size + output_size))); // W_hy
+        std::normal_distribution<> d_tanh(0.0, std::sqrt(2.0 / (hidden_size + vocab_size)));
+        std::normal_distribution<> d_linear(0.0, std::sqrt(2.0 / (hidden_size + output_size)));
 
-        // Initialize weights and biases
         auto initialize_matrix_tanh = [&](size_t rows, size_t cols) {
             Matrix mat(rows, Vector(cols));
             for (size_t i = 0; i < rows; ++i) {
@@ -260,10 +241,9 @@ public:
             }
             return mat;
         };
-         auto initialize_matrix_bias = [&](size_t rows, size_t cols) {
-            return Matrix(rows, Vector(cols, 0.0)); // Biases often initialized to 0
+        auto initialize_matrix_bias = [&](size_t rows, size_t cols) {
+            return Matrix(rows, Vector(cols, 0.0));
         };
-
 
         W_hh = initialize_matrix_tanh(hidden_size, hidden_size);
         W_xh = initialize_matrix_tanh(vocab_size, hidden_size);
@@ -273,7 +253,6 @@ public:
         b_y = initialize_matrix_bias(1, output_size);
     }
 
-    // Simplified one-hot encoding for a word ID
     Matrix one_hot_encode(int word_id) const {
         Matrix vector(1, Vector(vocab_size, 0.0));
         if (word_id >= 0 && word_id < vocab_size) {
@@ -282,106 +261,107 @@ public:
         return vector;
     }
 
-    // Forward pass
     Vector forward(const std::vector<int>& word_ids_sequence) {
-        // Clear history for new sequence
         hidden_states_history.clear();
         pre_tanh_activations.clear();
 
-        // Initial hidden state (h_0)
         Matrix h_t(1, Vector(hidden_size, 0.0));
-        hidden_states_history.push_back(h_t); // Store h_0
+        hidden_states_history.push_back(h_t);
 
         for (int word_id : word_ids_sequence) {
-            Matrix x_t = one_hot_encode(word_id); // Current input (1 x vocab_size)
+            Matrix x_t = one_hot_encode(word_id);
 
-            Matrix h_prev_whh = multiply(hidden_states_history.back(), W_hh); // h_{t-1} @ W_hh
-            Matrix x_t_wxh = multiply(x_t, W_xh);                             // x_t @ W_xh
+            Matrix h_prev_whh = multiply(hidden_states_history.back(), W_hh);
+            Matrix x_t_wxh = multiply(x_t, W_xh);
 
             Matrix sum_inputs = add(h_prev_whh, x_t_wxh);
-            Matrix h_t_unactivated = add(sum_inputs, b_h); // Before tanh
+            Matrix h_t_unactivated = add(sum_inputs, b_h);
 
-            pre_tanh_activations.push_back(h_t_unactivated); // Store for backprop
+            pre_tanh_activations.push_back(h_t_unactivated);
 
-            h_t = apply_function(h_t_unactivated, tanh_activation); // h_t = tanh(...)
-            hidden_states_history.push_back(h_t); // Store h_t
+            h_t = apply_function(h_t_unactivated, tanh_activation);
+            hidden_states_history.push_back(h_t);
         }
 
-        // Output Layer calculation
-        Matrix final_h_t = hidden_states_history.back(); // h_T
+        Matrix final_h_t = hidden_states_history.back();
         Matrix output_unactivated_matrix = add(
             multiply(final_h_t, W_hy),
             b_y
         );
 
-        return softmax(output_unactivated_matrix[0]); // Return probabilities
+        return softmax(output_unactivated_matrix[0]);
     }
 
-    // Backward pass (simplified for demonstration)
+    // FIXED #1: Proper Backpropagation Through Time (BPTT)
     void backward(const std::vector<int>& word_ids_sequence, const Vector& predictions, const Vector& targets) {
-        // dL/dY_pred (d_output) - gradient of loss with respect to predictions
-        Vector d_output_pred = mean_squared_error_derivative(predictions, targets);
-        Matrix d_output_mat(1, d_output_pred); // Convert to Matrix for operations
+        // Use cross-entropy derivative instead of MSE
+        Vector d_output_pred = cross_entropy_derivative(predictions, targets);
+        Matrix d_output_mat(1, d_output_pred);
 
-        // 1. Gradients for Output Layer (W_hy, b_y)
-        // dL/d(W_hy) = dL/dY_pred * dY_pred/d(output_unactivated) * d(output_unactivated)/d(W_hy)
-        // For linear layer Y = H_T @ W_hy + b_y, dY/dW_hy = H_T^T
-        // For Softmax with MSE, the exact derivative is complex. We'll approximate using
-        // dL/d(output_unactivated) = d_output_mat. This is a common simplification for demonstration
-        // in combination with MSE, but less accurate than Cross-Entropy with Softmax.
+        // Output layer gradients
+        Matrix final_h_t = hidden_states_history.back();
+        Matrix d_W_hy = multiply(transpose(final_h_t), d_output_mat);
+        Matrix d_b_y = d_output_mat;
 
-        Matrix final_h_t = hidden_states_history.back(); // H_T
-        Matrix d_W_hy = multiply(transpose(final_h_t), d_output_mat); // (H_T)^T @ dL/dY_pred
-        Matrix d_b_y = d_output_mat; // dL/dY_pred, summed over batch (here, batch size 1)
+        // Initialize cumulative gradients for recurrent weights
+        Matrix d_W_hh_cumulative(hidden_size, Vector(hidden_size, 0.0));
+        Matrix d_W_xh_cumulative(vocab_size, Vector(hidden_size, 0.0));
+        Matrix d_b_h_cumulative(1, Vector(hidden_size, 0.0));
 
-        // 2. Gradients propagating back to the final hidden state (d_h_T)
-        // dL/d(h_T) = dL/dY_pred * dY_pred/d(h_T) = d_output_mat @ (W_hy)^T
-        Matrix d_h_t_prop = multiply(d_output_mat, transpose(W_hy)); // Propagate error back through W_hy
+        // Backpropagate through time: loop backward through all time steps
+        Matrix d_h_t_prop = multiply(d_output_mat, transpose(W_hy));
 
-        // 3. Gradients for Recurrent Layer (Simplified BPTT - only considers final h_t for W_hh, W_xh, b_h)
-        // A true BPTT would sum gradients across all time steps. This is a *major* simplification.
+        int T = word_ids_sequence.size();
+        for (int t = T - 1; t >= 0; --t) {
+            // Backprop through tanh activation
+            Matrix d_h_t_unactivated = hadamard_product(d_h_t_prop, tanh_derivative_from_output(hidden_states_history[t + 1]));
 
-        // Apply derivative of tanh to d_h_t_prop
-        // dL/d(h_t_unactivated) = dL/d(h_t) * d(h_t)/d(h_t_unactivated) = d_h_t_prop * (1 - h_t^2)
-        Matrix d_h_t_unactivated = hadamard_product(d_h_t_prop, tanh_derivative_from_output(final_h_t));
+            // Accumulate gradients for recurrent weights at time step t
+            Matrix h_prev = hidden_states_history[t];
+            Matrix x_t = one_hot_encode(word_ids_sequence[t]);
 
-        // Gradients for W_hh, W_xh, b_h based on final hidden state's error
-        // This is where a full BPTT would loop backwards through all time steps
+            Matrix d_W_hh_t = multiply(transpose(h_prev), d_h_t_unactivated);
+            Matrix d_W_xh_t = multiply(transpose(x_t), d_h_t_unactivated);
 
-        // For the *last* time step only:
-        Matrix h_prev_last_step = hidden_states_history[hidden_states_history.size() - 2]; // h_{T-1}
-        Matrix x_T = one_hot_encode(word_ids_sequence.back()); // x_T
+            // Add to cumulative gradients
+            d_W_hh_cumulative = add(d_W_hh_cumulative, d_W_hh_t);
+            d_W_xh_cumulative = add(d_W_xh_cumulative, d_W_xh_t);
+            d_b_h_cumulative = add(d_b_h_cumulative, d_h_t_unactivated);
 
-        Matrix d_W_hh = multiply(transpose(h_prev_last_step), d_h_t_unactivated); // (h_{T-1})^T @ dL/d(h_T_unactivated)
-        Matrix d_W_xh = multiply(transpose(x_T), d_h_t_unactivated);             // (x_T)^T @ dL/d(h_T_unactivated)
-        Matrix d_b_h = d_h_t_unactivated;                                        // dL/d(h_T_unactivated)
+            // Backprop gradient to previous time step
+            if (t > 0) {
+                d_h_t_prop = multiply(d_h_t_unactivated, transpose(W_hh));
+            }
+        }
 
-        // --- Update Weights and Biases ---
-        // Weights = Weights - learning_rate * Gradients
+        // FIXED #3: Apply gradient clipping before weight updates
+        d_W_hy = clip_gradients(d_W_hy, gradient_clip_norm);
+        d_b_y = clip_gradients(d_b_y, gradient_clip_norm);
+        d_W_hh_cumulative = clip_gradients(d_W_hh_cumulative, gradient_clip_norm);
+        d_W_xh_cumulative = clip_gradients(d_W_xh_cumulative, gradient_clip_norm);
+        d_b_h_cumulative = clip_gradients(d_b_h_cumulative, gradient_clip_norm);
 
+        // Update weights with clipped gradients
         W_hy = subtract(W_hy, scale(d_W_hy, learning_rate));
         b_y = subtract(b_y, scale(d_b_y, learning_rate));
-
-        W_hh = subtract(W_hh, scale(d_W_hh, learning_rate));
-        W_xh = subtract(W_xh, scale(d_W_xh, learning_rate));
-        b_h = subtract(b_h, scale(d_b_h, learning_rate));
+        W_hh = subtract(W_hh, scale(d_W_hh_cumulative, learning_rate));
+        W_xh = subtract(W_xh, scale(d_W_xh_cumulative, learning_rate));
+        b_h = subtract(b_h, scale(d_b_h_cumulative, learning_rate));
     }
 
-    // Training loop
     void train(const std::vector<std::pair<std::string, std::string>>& training_data,
                const std::map<std::string, int>& vocab_map,
                const std::vector<std::string>& diagnosis_labels,
                int num_epochs) {
 
         std::map<std::string, Vector> target_vectors;
-        // Pre-create one-hot target vectors for diagnoses
         for (size_t i = 0; i < diagnosis_labels.size(); ++i) {
             Vector target(diagnosis_labels.size(), 0.0);
             target[i] = 1.0;
             target_vectors[diagnosis_labels[i]] = target;
         }
 
-        std::cout << "\n--- Starting Training ---\n";
+        std::cout << "\n--- Starting Training (with BPTT, Cross-Entropy Loss, & Gradient Clipping) ---\n";
 
         for (int epoch = 0; epoch < num_epochs; ++epoch) {
             double epoch_loss = 0.0;
@@ -392,7 +372,6 @@ public:
                 const std::string& note_text = note_pair.first;
                 const std::string& true_diagnosis_label = note_pair.second;
 
-                // Tokenization (same as in main)
                 std::vector<int> word_ids;
                 std::string current_word;
                 for (char c : note_text) {
@@ -418,24 +397,17 @@ public:
                 }
 
                 if (word_ids.empty()) {
-                    // std::cout << "  [Epoch " << epoch << "] Skipping empty note.\n";
-                    continue; // Skip notes with no recognized words
+                    continue;
                 }
 
-                // Forward pass
                 Vector predictions = forward(word_ids);
-
-                // Get true target vector
                 const Vector& targets = target_vectors.at(true_diagnosis_label);
 
-                // Calculate loss
-                double current_loss = mean_squared_error(predictions, targets);
+                double current_loss = cross_entropy_loss(predictions, targets);
                 epoch_loss += current_loss;
 
-                // Backpropagate and update weights
                 backward(word_ids, predictions, targets);
 
-                // Check accuracy
                 auto max_it = std::max_element(predictions.begin(), predictions.end());
                 int predicted_index = std::distance(predictions.begin(), max_it);
                 int true_index = std::distance(diagnosis_labels.begin(), std::find(diagnosis_labels.begin(), diagnosis_labels.end(), true_diagnosis_label));
@@ -452,10 +424,7 @@ public:
     }
 };
 
-// --- Example Usage ---
-
 int main() {
-    // 1. Define a simple vocabulary and mapping
     std::map<std::string, int> vocab = {
         {"fever", 0}, {"cough", 1}, {"headache", 2}, {"sore", 3}, {"throat", 4},
         {"fatigue", 5}, {"pneumonia", 6}, {"shortness", 7}, {"breath", 8},
@@ -506,17 +475,14 @@ int main() {
         {"air", 228}, {"admitted", 229}, {"lie", 230}, {"flat", 231}, {"comfortably", 232}
     };
 
-
     std::vector<std::string> diagnoses = {"Cold", "Flu", "Pneumonia"};
 
-    // 2. Network Parameters
     int vocab_size = vocab.size();
-    int hidden_size = 10; // Size of the hidden state vector
-    int output_size = diagnoses.size(); // Number of possible diagnoses
-    double learning_rate = 0.01; // Learning rate for gradient descent
-    int num_epochs = 100; // Number of training iterations over the dataset
+    int hidden_size = 10;
+    int output_size = diagnoses.size();
+    double learning_rate = 0.01;
+    int num_epochs = 100;
 
-    // 3. Instantiate the RNN
     SimpleRNN rnn(vocab_size, hidden_size, output_size, learning_rate);
 
     std::cout << "RNN Initialized with:\n";
@@ -524,17 +490,13 @@ int main() {
     std::cout << "  Hidden Size: " << rnn.hidden_size << "\n";
     std::cout << "  Output Size: " << rnn.output_size << "\n";
     std::cout << "  Learning Rate: " << rnn.learning_rate << "\n";
+    std::cout << "  Gradient Clip Norm: " << rnn.gradient_clip_norm << "\n";
     std::cout << "  Epochs: " << num_epochs << "\n";
 
-
-    // 4. Train the RNN
     rnn.train(SIMULATED_CLINICAL_NOTES, vocab, diagnoses, num_epochs);
-
 
     std::cout << "\n--- Final Predictions After Training ---\n";
 
-    // 5. Test the trained RNN with a few examples
-    // We'll reuse the first few notes to see if it learned anything
     std::vector<std::pair<std::string, std::string>> test_notes = {
         {"Patient presents with mild cough, runny nose, and sore throat.", "Cold"},
         {"Complains of body aches, chills, and a fever of 102F. Feels exhausted.", "Flu"},
@@ -544,7 +506,6 @@ int main() {
         {"Fever 102F, severe cough producing thick phlegm, and shortness of breath.", "Pneumonia"}
     };
 
-
     int test_count = 0;
     for (const auto& note_pair : test_notes) {
         const std::string& note_text = note_pair.first;
@@ -553,7 +514,6 @@ int main() {
         test_count++;
         std::cout << "\nTesting Note " << test_count << " (True: " << true_diagnosis << "): \"" << note_text << "\"\n";
 
-        // Tokenization (same as training)
         std::vector<int> word_ids;
         std::string current_word;
         for (char c : note_text) {
@@ -595,7 +555,6 @@ int main() {
         std::string predicted_diagnosis = diagnoses[predicted_index];
         std::cout << "  Most probable diagnosis: " << predicted_diagnosis << " (True: " << true_diagnosis << ")\n";
     }
-
 
     return 0;
 }
