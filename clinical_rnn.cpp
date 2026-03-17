@@ -41,6 +41,9 @@ Matrix subtract(const Matrix& A, const Matrix& B) {
     return C;
 }
 
+// O(n³) naive matrix multiplication. For production use, consider Eigen or Armadillo libraries
+// which use optimized algorithms and SIMD instructions. This naive approach is fine for
+// educational purposes and small matrices (vocab_size < 300, hidden_size < 50).
 Matrix multiply(const Matrix& A, const Matrix& B) {
     size_t rowsA = A.size();
     size_t colsA = A[0].size();
@@ -204,6 +207,7 @@ public:
     int output_size;
     double learning_rate;
     double gradient_clip_norm;
+    int unk_token_id;  // ID for unknown words (reserved as last vocab slot)
 
     Matrix W_hh;
     Matrix W_xh;
@@ -216,7 +220,8 @@ public:
     std::vector<Matrix> pre_tanh_activations;
 
     SimpleRNN(int vocab_s, int hidden_s, int output_s, double lr)
-        : vocab_size(vocab_s), hidden_size(hidden_s), output_size(output_s), learning_rate(lr), gradient_clip_norm(1.0) {
+        : vocab_size(vocab_s), hidden_size(hidden_s), output_size(output_s), learning_rate(lr),
+          gradient_clip_norm(1.0), unk_token_id(vocab_s - 1) {  // Last vocab index reserved for UNK
 
         std::random_device rd;
         std::mt19937 gen(rd());
@@ -255,7 +260,10 @@ public:
 
     Matrix one_hot_encode(int word_id) const {
         Matrix vector(1, Vector(vocab_size, 0.0));
-        if (word_id >= 0 && word_id < vocab_size) {
+        // Use word_id if valid, otherwise use UNK token (last vocab index)
+        if (word_id < 0 || word_id >= vocab_size) {
+            vector[0][unk_token_id] = 1.0;
+        } else {
             vector[0][word_id] = 1.0;
         }
         return vector;
@@ -349,26 +357,159 @@ public:
         b_h = subtract(b_h, scale(d_b_h_cumulative, learning_rate));
     }
 
+    // Split data into train/val/test: 70% train, 15% val, 15% test
+    void split_data(const std::vector<std::pair<std::string, std::string>>& all_data,
+                    std::vector<std::pair<std::string, std::string>>& train_data,
+                    std::vector<std::pair<std::string, std::string>>& val_data,
+                    std::vector<std::pair<std::string, std::string>>& test_data) {
+        std::vector<std::pair<std::string, std::string>> shuffled_data = all_data;
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::shuffle(shuffled_data.begin(), shuffled_data.end(), gen);
+
+        size_t train_size = (shuffled_data.size() * 7) / 10;
+        size_t val_size = (shuffled_data.size() * 15) / 100;
+
+        train_data.assign(shuffled_data.begin(), shuffled_data.begin() + train_size);
+        val_data.assign(shuffled_data.begin() + train_size, shuffled_data.begin() + train_size + val_size);
+        test_data.assign(shuffled_data.begin() + train_size + val_size, shuffled_data.end());
+    }
+
+    // Evaluate on a dataset and return accuracy metrics
+    struct EvaluationMetrics {
+        double loss;
+        double accuracy;
+        std::map<std::string, double> per_class_accuracy;
+    };
+
+    EvaluationMetrics evaluate(const std::vector<std::pair<std::string, std::string>>& data,
+                               const std::map<std::string, int>& vocab_map,
+                               const std::vector<std::string>& diagnosis_labels) {
+        EvaluationMetrics metrics;
+        metrics.loss = 0.0;
+        metrics.accuracy = 0.0;
+        for (const auto& label : diagnosis_labels) {
+            metrics.per_class_accuracy[label] = 0.0;
+        }
+
+        std::map<std::string, int> class_correct;
+        std::map<std::string, int> class_total;
+        for (const auto& label : diagnosis_labels) {
+            class_correct[label] = 0;
+            class_total[label] = 0;
+        }
+
+        int correct = 0;
+        for (const auto& note_pair : data) {
+            const std::string& note_text = note_pair.first;
+            const std::string& true_label = note_pair.second;
+
+            // Tokenize
+            std::vector<int> word_ids;
+            std::string current_word;
+            for (char c : note_text) {
+                if (c == ' ' || c == '\n' || c == '\t' || c == '.' || c == ',' || c == '(' || c == ')') {
+                    if (!current_word.empty()) {
+                        std::transform(current_word.begin(), current_word.end(), current_word.begin(),
+                                       [](unsigned char ch){ return std::tolower(ch); });
+                        if (vocab_map.count(current_word)) {
+                            word_ids.push_back(vocab_map.at(current_word));
+                        } else {
+                            word_ids.push_back(unk_token_id);  // Use UNK for unknown words
+                        }
+                        current_word.clear();
+                    }
+                } else {
+                    current_word += c;
+                }
+            }
+            if (!current_word.empty()) {
+                std::transform(current_word.begin(), current_word.end(), current_word.begin(),
+                               [](unsigned char ch){ return std::tolower(ch); });
+                if (vocab_map.count(current_word)) {
+                    word_ids.push_back(vocab_map.at(current_word));
+                } else {
+                    word_ids.push_back(unk_token_id);
+                }
+            }
+
+            if (word_ids.empty()) continue;
+
+            Vector predictions = forward(word_ids);
+            metrics.loss += cross_entropy_loss(predictions, create_target_vector(true_label, diagnosis_labels));
+
+            auto max_it = std::max_element(predictions.begin(), predictions.end());
+            int predicted_index = std::distance(predictions.begin(), max_it);
+            std::string predicted_label = diagnosis_labels[predicted_index];
+
+            class_total[true_label]++;
+            if (predicted_index == std::distance(diagnosis_labels.begin(),
+                    std::find(diagnosis_labels.begin(), diagnosis_labels.end(), true_label))) {
+                correct++;
+                class_correct[true_label]++;
+            }
+        }
+
+        if (data.empty()) return metrics;
+
+        metrics.loss /= data.size();
+        metrics.accuracy = static_cast<double>(correct) / data.size();
+        for (const auto& label : diagnosis_labels) {
+            if (class_total[label] > 0) {
+                metrics.per_class_accuracy[label] = static_cast<double>(class_correct[label]) / class_total[label];
+            }
+        }
+
+        return metrics;
+    }
+
+    Vector create_target_vector(const std::string& label, const std::vector<std::string>& labels) {
+        Vector target(labels.size(), 0.0);
+        auto it = std::find(labels.begin(), labels.end(), label);
+        if (it != labels.end()) {
+            target[std::distance(labels.begin(), it)] = 1.0;
+        }
+        return target;
+    }
+
     void train(const std::vector<std::pair<std::string, std::string>>& training_data,
                const std::map<std::string, int>& vocab_map,
                const std::vector<std::string>& diagnosis_labels,
-               int num_epochs) {
+               int num_epochs,
+               bool use_data_split = true,
+               double learning_rate_decay = 0.0) {
 
-        std::map<std::string, Vector> target_vectors;
-        for (size_t i = 0; i < diagnosis_labels.size(); ++i) {
-            Vector target(diagnosis_labels.size(), 0.0);
-            target[i] = 1.0;
-            target_vectors[diagnosis_labels[i]] = target;
+        // Split data if requested
+        std::vector<std::pair<std::string, std::string>> train_set = training_data;
+        std::vector<std::pair<std::string, std::string>> val_set;
+        std::vector<std::pair<std::string, std::string>> test_set;
+
+        if (use_data_split && training_data.size() > 10) {
+            split_data(training_data, train_set, val_set, test_set);
+            std::cout << "Data split: Train=" << train_set.size() << ", Val=" << val_set.size()
+                      << ", Test=" << test_set.size() << "\n";
         }
 
-        std::cout << "\n--- Starting Training (with BPTT, Cross-Entropy Loss, & Gradient Clipping) ---\n";
+        std::cout << "\n--- Starting Training (BPTT, Cross-Entropy Loss, Gradient Clipping, UNK Tokens) ---\n";
+        std::cout << "Learning rate: " << learning_rate;
+        if (learning_rate_decay > 0) {
+            std::cout << " (with decay: " << learning_rate_decay << ")";
+        }
+        std::cout << "\n";
+
+        double initial_lr = learning_rate;
 
         for (int epoch = 0; epoch < num_epochs; ++epoch) {
+            // Apply learning rate decay
+            if (learning_rate_decay > 0) {
+                learning_rate = initial_lr / (1.0 + learning_rate_decay * epoch);
+            }
+
             double epoch_loss = 0.0;
             int correct_predictions = 0;
             int total_predictions = 0;
 
-            for (const auto& note_pair : training_data) {
+            for (const auto& note_pair : train_set) {
                 const std::string& note_text = note_pair.first;
                 const std::string& true_diagnosis_label = note_pair.second;
 
@@ -381,6 +522,8 @@ public:
                                            [](unsigned char ch){ return std::tolower(ch); });
                             if (vocab_map.count(current_word)) {
                                 word_ids.push_back(vocab_map.at(current_word));
+                            } else {
+                                word_ids.push_back(unk_token_id);  // Use UNK for unknown words
                             }
                             current_word.clear();
                         }
@@ -393,6 +536,8 @@ public:
                                    [](unsigned char ch){ return std::tolower(ch); });
                     if (vocab_map.count(current_word)) {
                         word_ids.push_back(vocab_map.at(current_word));
+                    } else {
+                        word_ids.push_back(unk_token_id);
                     }
                 }
 
@@ -401,7 +546,7 @@ public:
                 }
 
                 Vector predictions = forward(word_ids);
-                const Vector& targets = target_vectors.at(true_diagnosis_label);
+                Vector targets = create_target_vector(true_diagnosis_label, diagnosis_labels);
 
                 double current_loss = cross_entropy_loss(predictions, targets);
                 epoch_loss += current_loss;
@@ -417,9 +562,34 @@ public:
                 }
                 total_predictions++;
             }
-            std::cout << "Epoch " << epoch + 1 << " completed. Average Loss: " << std::fixed << std::setprecision(6) << epoch_loss / total_predictions
-                      << ", Accuracy: " << std::fixed << std::setprecision(2) << (static_cast<double>(correct_predictions) / total_predictions) * 100.0 << "%\n";
+
+            // Print training metrics
+            std::cout << "Epoch " << epoch + 1 << " | Train Loss: " << std::fixed << std::setprecision(6)
+                      << epoch_loss / total_predictions << " | Train Acc: " << std::fixed << std::setprecision(2)
+                      << (static_cast<double>(correct_predictions) / total_predictions) * 100.0 << "%";
+
+            // Evaluate on validation set if available
+            if (!val_set.empty()) {
+                EvaluationMetrics val_metrics = evaluate(val_set, vocab_map, diagnosis_labels);
+                std::cout << " | Val Loss: " << std::fixed << std::setprecision(6) << val_metrics.loss
+                          << " | Val Acc: " << std::fixed << std::setprecision(2) << val_metrics.accuracy * 100.0 << "%";
+            }
+            std::cout << "\n";
         }
+
+        // Final evaluation on test set
+        if (!test_set.empty()) {
+            std::cout << "\n--- Test Set Evaluation ---\n";
+            EvaluationMetrics test_metrics = evaluate(test_set, vocab_map, diagnosis_labels);
+            std::cout << "Test Loss: " << std::fixed << std::setprecision(6) << test_metrics.loss << "\n";
+            std::cout << "Test Accuracy: " << std::fixed << std::setprecision(2) << test_metrics.accuracy * 100.0 << "%\n";
+            std::cout << "Per-Class Accuracy:\n";
+            for (const auto& label : diagnosis_labels) {
+                std::cout << "  " << label << ": " << std::fixed << std::setprecision(2)
+                          << test_metrics.per_class_accuracy[label] * 100.0 << "%\n";
+            }
+        }
+
         std::cout << "--- Training Finished ---\n";
     }
 };
@@ -493,7 +663,8 @@ int main() {
     std::cout << "  Gradient Clip Norm: " << rnn.gradient_clip_norm << "\n";
     std::cout << "  Epochs: " << num_epochs << "\n";
 
-    rnn.train(SIMULATED_CLINICAL_NOTES, vocab, diagnoses, num_epochs);
+    // Train with data splitting and learning rate decay
+    rnn.train(SIMULATED_CLINICAL_NOTES, vocab, diagnoses, num_epochs, true, 0.05);
 
     std::cout << "\n--- Final Predictions After Training ---\n";
 
@@ -523,6 +694,8 @@ int main() {
                                    [](unsigned char ch){ return std::tolower(ch); });
                     if (vocab.count(current_word)) {
                         word_ids.push_back(vocab.at(current_word));
+                    } else {
+                        word_ids.push_back(rnn.unk_token_id);  // Use UNK for unknown words
                     }
                     current_word.clear();
                 }
@@ -535,6 +708,8 @@ int main() {
                            [](unsigned char ch){ return std::tolower(ch); });
             if (vocab.count(current_word)) {
                 word_ids.push_back(vocab.at(current_word));
+            } else {
+                word_ids.push_back(rnn.unk_token_id);
             }
         }
 
